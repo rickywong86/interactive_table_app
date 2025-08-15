@@ -1,37 +1,41 @@
-from flask import Blueprint, render_template, request, url_for, redirect, flash, jsonify
-from .models import Project, Transaction, Category, Asset, UserCorrection
+from flask import render_template, Blueprint, request, redirect, url_for, flash, jsonify
 from app import db
-import uuid
-from datetime import datetime
+from .models import Project, Transaction, Category, Asset, UserCorrection
+import datetime
+import random
 import csv
 import io
 from sentence_transformers import SentenceTransformer, util
 
-project_bp = Blueprint('project', __name__)
+project = Blueprint('project', __name__)
 
-@project_bp.route('/')
+@project.route('/')
 def index():
-    """
-    Main page route, displaying a paginated and searchable list of projects.
-    """
+    """Renders the main project table page with pagination and search functionality."""
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 10, type=int)
     search_query = request.args.get('search', '', type=str)
-    highlight_id = request.args.get('highlight_id', None, type=str)
 
     query = Project.query
     if search_query:
-        query = query.filter(Project.description.ilike(f'%{search_query}%'))
+        query = query.filter(Project.description.like(f'%{search_query}%'))
 
-    pagination = query.paginate(page=page, per_page=per_page)
-    return render_template('index.html', pagination=pagination, search_query=search_query, highlight_id=highlight_id, per_page=per_page)
+    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+    
+    assets = Asset.query.order_by(Asset.name).all()
 
-@project_bp.route('/project/create', methods=['POST'])
+    return render_template('index.html', pagination=pagination, search_query=search_query, per_page=per_page, assets=assets)
+
+@project.route('/projects/<uuid:project_id>')
+def project_details(project_id):
+    """Render the project details page for a specific project ID."""
+    project_instance = Project.query.get_or_404(project_id)
+    return render_template('project_details.html', project=project_instance)
+
+@project.route('/project/create', methods=['POST'])
 def create_project():
-    """
-    Handles the creation of a new project.
-    """
-    description = request.form.get('description')
+    """Creates a new project from form data."""
+    description = request.form['description']
     completed = 'completed' in request.form
     new_project = Project(description=description, completed=completed)
     db.session.add(new_project)
@@ -39,28 +43,56 @@ def create_project():
     flash('Project created successfully!', 'success')
     return redirect(url_for('project.index', highlight_id=new_project.id))
 
-@project_bp.route('/project/<uuid:project_id>/update', methods=['POST'])
+@project.route('/project/<int:project_id>/update', methods=['POST'])
 def update_project(project_id):
-    """
-    Handles the update of an existing project.
-    """
-    project_record = Project.query.get_or_404(project_id)
-    project_record.description = request.form.get('description')
-    project_record.completed = 'completed' in request.form
+    """Updates an existing project."""
+    project_to_update = Project.query.get_or_404(project_id)
+    project_to_update.description = request.form['description']
+    project_to_update.completed = 'completed' in request.form
     db.session.commit()
     flash('Project updated successfully!', 'success')
-    return redirect(url_for('project.index', highlight_id=project_record.id))
+    return redirect(url_for('project.index', highlight_id=project_to_update.id))
 
-@project_bp.route('/project/<uuid:project_id>/delete', methods=['POST'])
+@project.route('/project/<int:project_id>/delete', methods=['POST'])
 def delete_project(project_id):
-    """
-    Handles the deletion of a project.
-    """
-    project_record = Project.query.get_or_404(project_id)
-    db.session.delete(project_record)
+    """Deletes a project by its ID."""
+    project_to_delete = Project.query.get_or_404(project_id)
+    db.session.delete(project_to_delete)
     db.session.commit()
-    flash('Project deleted successfully!', 'success')
+    flash('Project deleted successfully!', 'danger')
     return redirect(url_for('project.index'))
+
+@project.route('/project/<uuid:project_id>/transactions')
+def get_transactions(project_id):
+    """API endpoint to get transactions for a project."""
+    project_instance = Project.query.get_or_404(project_id)
+    transactions = []
+    for t in project_instance.transactions:
+        try:
+            transactions.append({
+                'id': t.id,
+                'transdate': t.transdate.isoformat(),
+                'desc': t.desc,
+                'amount': t.amount,
+                'category': t.category,
+                'sourceAcc': t.sourceAcc,
+                'destinationAcc': t.destinationAcc,
+                'score': t.score
+            })
+        except Exception as e:
+            # This is where the error is likely happening.
+            # Print the transaction ID to help with debugging.
+            print(f"Error serializing transaction ID {t.id}: {e}")
+            # Skip the problematic transaction and continue.
+            continue
+
+    return jsonify({
+        'id': project_instance.id,
+        'description': project_instance.description,
+        'created': project_instance.created.isoformat(),
+        'completed': project_instance.completed,
+        'transactions': transactions
+    })
 
 def _rescore_transactions(transactions):
     """
@@ -95,7 +127,7 @@ def _rescore_transactions(transactions):
         transaction.score = best_match_score
     db.session.commit()
 
-@project_bp.route('/project/<uuid:project_id>/refresh_scores', methods=['POST'])
+@project.route('/project/<uuid:project_id>/refresh_scores', methods=['POST'])
 def refresh_project_scores(project_id):
     """
     API endpoint to refresh semantic scores for all transactions in a project.
@@ -104,7 +136,7 @@ def refresh_project_scores(project_id):
     _rescore_transactions(transactions)
     return jsonify({'message': 'All transaction scores refreshed successfully!'})
 
-@project_bp.route('/transaction/<uuid:transaction_id>/refresh_score', methods=['POST'])
+@project.route('/transaction/<uuid:transaction_id>/refresh_score', methods=['POST'])
 def refresh_transaction_score(transaction_id):
     """
     API endpoint to refresh the semantic score for a single transaction.
@@ -113,7 +145,7 @@ def refresh_transaction_score(transaction_id):
     _rescore_transactions([transaction])
     return jsonify({'message': 'Transaction score refreshed successfully!'})
 
-@project_bp.route('/project/<uuid:project_id>/transactions', methods=['GET'])
+@project.route('/project/<uuid:project_id>/transactions', methods=['GET'])
 def get_project_transactions(project_id):
     """
     API endpoint to get a project's details and transactions in JSON format.
@@ -140,7 +172,7 @@ def get_project_transactions(project_id):
         'transactions': transactions_data
     })
 
-@project_bp.route('/project/<uuid:project_id>/upload', methods=['POST'])
+@project.route('/project/<uuid:project_id>/upload', methods=['POST'])
 def upload_transactions(project_id):
     """
     Handles the upload of a text file and imports transactions,
@@ -223,7 +255,7 @@ def upload_transactions(project_id):
             db.session.rollback()
             return jsonify({'message': f'Error importing data: {e}'}), 500
 
-@project_bp.route('/transaction/<uuid:transaction_id>/update', methods=['PUT'])
+@project.route('/transaction/<uuid:transaction_id>/update', methods=['PUT'])
 def update_transaction(transaction_id):
     """
     API endpoint to update an existing transaction and capture user corrections.
@@ -258,7 +290,7 @@ def update_transaction(transaction_id):
     db.session.commit()
     return jsonify({'message': 'Transaction updated successfully!'})
 
-@project_bp.route('/transaction/<uuid:transaction_id>/delete', methods=['DELETE'])
+@project.route('/transaction/<uuid:transaction_id>/delete', methods=['DELETE'])
 def delete_transaction(transaction_id):
     """
     API endpoint to delete a transaction.
@@ -268,7 +300,7 @@ def delete_transaction(transaction_id):
     db.session.commit()
     return jsonify({'message': 'Transaction deleted successfully!'})
 
-@project_bp.route('/project/<uuid:project_id>/transactions/delete_all', methods=['DELETE'])
+@project.route('/project/<uuid:project_id>/transactions/delete_all', methods=['DELETE'])
 def delete_all_transactions(project_id):
     """
     API endpoint to delete all transactions for a specific project.
@@ -290,7 +322,7 @@ def delete_all_transactions(project_id):
     db.session.commit()
     return jsonify({'message': message})
 
-@project_bp.route('/categories/list', methods=['GET'])
+@project.route('/categories/list', methods=['GET'])
 def get_categories():
     """
     API endpoint to get a list of all categories.
@@ -303,7 +335,7 @@ def get_categories():
     } for c in categories]
     return jsonify(categories_data)
 
-@project_bp.route('/assets/list', methods=['GET'])
+@project.route('/assets/list', methods=['GET'])
 def get_assets():
     """
     API endpoint to get a list of all assets.
@@ -315,7 +347,7 @@ def get_assets():
     } for a in assets]
     return jsonify(assets_data)
 
-@project_bp.route('/asset/create', methods=['POST'])
+@project.route('/asset/create', methods=['POST'])
 def create_asset():
     """
     Handles the creation of a new asset.
@@ -336,7 +368,7 @@ def create_asset():
     flash(f'Asset "{asset_name}" created successfully!', 'success')
     return redirect(url_for('project.index'))
 
-@project_bp.route('/asset/<int:asset_id>/delete', methods=['POST'])
+@project.route('/asset/<int:asset_id>/delete', methods=['POST'])
 def delete_asset(asset_id):
     """
     Handles the deletion of an asset.
@@ -347,3 +379,15 @@ def delete_asset(asset_id):
     flash(f'Asset "{asset_record.name}" deleted successfully!', 'success')
     return redirect(url_for('project.index'))
 
+@project.route('/categories/list')
+def list_categories():
+    """API endpoint to list all unique categories and destination accounts."""
+    transactions = Transaction.query.all()
+    
+    unique_categories = sorted(list(set(t.category for t in transactions if t.category)))
+    unique_dest_accs = sorted(list(set(t.destinationAcc for t in transactions if t.destinationAcc)))
+
+    return jsonify([
+        {'category': c, 'destinationAcc': d}
+        for c, d in zip(unique_categories, unique_dest_accs)
+    ])

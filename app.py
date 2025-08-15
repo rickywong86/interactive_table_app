@@ -21,8 +21,8 @@ def create_app():
     db.init_app(app)
 
     # Import and register the blueprint from the project directory.
-    from project.routes import project_bp
-    app.register_blueprint(project_bp)
+    from project.routes import project
+    app.register_blueprint(project)
 
     # Create the instance directory if it doesn't exist.
     # This is where the SQLite database will be stored.
