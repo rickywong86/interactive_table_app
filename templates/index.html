@@ -119,6 +119,8 @@
                                 data-bs-target="#deleteConfirmModal" data-id="{{ project.id }}">
                                 Remove
                             </button>
+                            <a href="{{ url_for('project.export_csv', project_id=project.id) }}"
+                                class="btn btn-sm btn-success">Export CSV</a>
                         </td>
                     </tr>
                     {% endfor %}

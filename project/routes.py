@@ -1,7 +1,7 @@
-from flask import render_template, Blueprint, request, redirect, url_for, flash, jsonify
+from flask import render_template, Blueprint, request, redirect, url_for, flash, jsonify, Response
 from app import db
 from .models import Project, Transaction, Category, Asset, UserCorrection
-import datetime
+from datetime import datetime
 import random
 import csv
 import io
@@ -30,7 +30,8 @@ def index():
 def project_details(project_id):
     """Render the project details page for a specific project ID."""
     project_instance = Project.query.get_or_404(project_id)
-    return render_template('project_details.html', project=project_instance)
+    highlight_id = request.args.get('highlight_id', type=int)
+    return render_template('project_details.html', project=project_instance, highlight_id=highlight_id)
 
 @project.route('/project/create', methods=['POST'])
 def create_project():
@@ -62,14 +63,22 @@ def delete_project(project_id):
     flash('Project deleted successfully!', 'danger')
     return redirect(url_for('project.index'))
 
-@project.route('/project/<uuid:project_id>/transactions')
+@project.route('/project/<uuid:project_id>/transactions', methods=['GET'])
 def get_transactions(project_id):
-    """API endpoint to get transactions for a project."""
+    """API endpoint to get paginated transactions for a project."""
     project_instance = Project.query.get_or_404(project_id)
-    transactions = []
-    for t in project_instance.transactions:
+    
+    # Get pagination parameters from the request
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 10, type=int)
+
+    transactions_query = Transaction.query.filter_by(project_id=project_id).order_by(Transaction.transdate.desc())
+    pagination = transactions_query.paginate(page=page, per_page=per_page, error_out=False)
+
+    transactions_list = []
+    for t in pagination.items:
         try:
-            transactions.append({
+            transactions_list.append({
                 'id': t.id,
                 'transdate': t.transdate.isoformat(),
                 'desc': t.desc,
@@ -91,7 +100,14 @@ def get_transactions(project_id):
         'description': project_instance.description,
         'created': project_instance.created.isoformat(),
         'completed': project_instance.completed,
-        'transactions': transactions
+        'transactions': transactions_list,
+        'has_next': pagination.has_next,
+        'has_prev': pagination.has_prev,
+        'next_num': pagination.next_num,
+        'prev_num': pagination.prev_num,
+        'page': pagination.page,
+        'pages': pagination.pages,
+        'per_page': pagination.per_page
     })
 
 def _rescore_transactions(transactions):
@@ -145,7 +161,6 @@ def refresh_transaction_score(transaction_id):
     _rescore_transactions([transaction])
     return jsonify({'message': 'Transaction score refreshed successfully!'})
 
-@project.route('/project/<uuid:project_id>/transactions', methods=['GET'])
 def get_project_transactions(project_id):
     """
     API endpoint to get a project's details and transactions in JSON format.
@@ -255,6 +270,41 @@ def upload_transactions(project_id):
             db.session.rollback()
             return jsonify({'message': f'Error importing data: {e}'}), 500
 
+@project.route('/project/<uuid:project_id>/export_csv', methods=['GET'])
+def export_csv(project_id):
+    """Exports all transactions for a project to a CSV file."""
+    project_instance = Project.query.get_or_404(project_id)
+    transactions = project_instance.transactions
+
+    # Prepare CSV data
+    si = io.StringIO()
+    cw = csv.writer(si)
+    
+    # Headers in the specified order
+    headers = ['source account', 'Description', 'destination account', 'Date', 'Amount', 'category']
+    cw.writerow(headers)
+
+    for t in transactions:
+        row = [
+            t.sourceAcc,
+            t.desc,
+            t.destinationAcc,
+            t.transdate.strftime('%Y%m%d') if t.transdate else '',
+            t.amount,
+            t.category,
+        ]
+        cw.writerow(row)
+
+    output = si.getvalue()
+    si.close()
+
+    # Generate filename from project description
+    filename = f"{project_instance.description.replace(' ', '_').replace('/', '-')}_transactions.csv"
+    
+    response = Response(output, mimetype='text/csv')
+    response.headers['Content-Disposition'] = f'attachment; filename={filename}'
+    return response
+
 @project.route('/transaction/<uuid:transaction_id>/update', methods=['PUT'])
 def update_transaction(transaction_id):
     """
@@ -269,7 +319,7 @@ def update_transaction(transaction_id):
 
     # Update the transaction record
     transaction_record.category = data.get('category', old_category)
-    transaction_record.sourceAcc = data.get('sourceAcc', transaction_record.sourceAcc)
+    # transaction_record.sourceAcc = data.get('sourceAcc', transaction_record.sourceAcc)
     transaction_record.destinationAcc = data.get('destinationAcc', old_destinationAcc)
     
     # If the category or destination account was changed, save it as a UserCorrection
